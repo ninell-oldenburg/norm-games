@@ -51,11 +51,11 @@ function check_setup() {
 
 
 function install_dmlab2d() {
-  #echo -e "\nCloning dmlab2d..."
-  #git clone https://github.com/deepmind/lab2d
+  echo -e "\nCloning dmlab2d..."
+  git clone https://github.com/deepmind/lab2d
 
   echo -e "\nInstalling dmlab2d requirements..."
-  pip3 install --upgrade pip packaging
+  pip install --upgrade pip packaging
 
   echo -e "\nBuilding dmlab2d wheel..."
   if [[ "$(uname -s)" == 'Linux' ]]; then
@@ -85,7 +85,7 @@ function install_dmlab2d() {
 
 function test_dmlab2d() {
   echo -e "\nTesting dmlab2d..."
-  python3 lab2d/dmlab2d/dmlab2d_test.py
+  python lab2d/dmlab2d/dmlab2d_test.py
 }
 
 
