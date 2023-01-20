@@ -20,7 +20,7 @@ set -euxo pipefail
 
 function check_setup() {
   echo -e "\nChecking meltingpot is installed..."
-  python -c 'import meltingpot'
+  python3 -c 'import meltingpot'
 }
 
 
@@ -40,7 +40,7 @@ function test_extras() {
 
 function test_rllib() {
   echo -e "\nTesting RLLib example..."
-  python <<EOF
+  python3 <<EOF
 from examples.rllib import self_play_train
 from examples.rllib import utils
 

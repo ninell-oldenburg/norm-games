@@ -18,7 +18,7 @@ Use `WASD` keys to move the character around. `Q` and `E` to turn.
 from absl import app
 from absl import flags
 
-from examples.tutorial.harvest.configs.environment import harvest as game
+from examples.tutorial.harvest.configs.environment import harvest_finished as game
 from meltingpot.python.human_players import level_playing_utils
 
 FLAGS = flags.FLAGS

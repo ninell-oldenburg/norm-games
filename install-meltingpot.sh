@@ -29,11 +29,11 @@ function check_version_gt() {
 
 function check_setup() {
   echo -e "\nChecking python version..."
-  python --version
-  python --version | check_version_gt '3.9'
+  python3 --version
+  python3 --version | check_version_gt '3.9'
 
   echo -e "\nChecking dmlab2d is installed..."
-  python -c 'import dmlab2d'
+  python3 -c 'import dmlab2d'
 }
 
 
