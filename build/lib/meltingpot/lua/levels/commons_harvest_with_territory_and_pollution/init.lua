@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ]]
 
--- Entry point lua file for the grid_land substrate.
+-- Entry point lua file for the commons_harvest substrate.
 
 local meltingpot = 'meltingpot.lua.modules.'
 local api_factory = require(meltingpot .. 'api_factory')
@@ -31,8 +31,6 @@ return api_factory.apiFactory{
         spriteSize = 8,
         -- Terminate the episode after this many frames.
         maxEpisodeLengthFrames = 1000,
-        -- Choose topology to be either 'BOUNDED' (the default) or 'TORUS'.
-        topology = 'TORUS',
         -- Settings to pass to simulation.lua.
         simulation = {},
     }

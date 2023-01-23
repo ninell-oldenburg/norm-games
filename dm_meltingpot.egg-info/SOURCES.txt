@@ -537,6 +537,8 @@ meltingpot/lua/levels/coins/components.lua
 meltingpot/lua/levels/coins/init.lua
 meltingpot/lua/levels/collaborative_cooking/components.lua
 meltingpot/lua/levels/collaborative_cooking/init.lua
+meltingpot/lua/levels/commons_harvest_with_territory_and_pollution/components.lua
+meltingpot/lua/levels/commons_harvest_with_territory_and_pollution/init.lua
 meltingpot/lua/levels/commons_harvest/components.lua
 meltingpot/lua/levels/commons_harvest/init.lua
 meltingpot/lua/levels/coop_mining/components.lua
