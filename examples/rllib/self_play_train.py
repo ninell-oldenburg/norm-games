@@ -26,7 +26,7 @@ from meltingpot.python import substrate
 
 
 def get_config(
-    substrate_name: str = "bach_or_stravinsky_in_the_matrix__repeated",
+    substrate_name: str = "commons_harvest_with_territory_and_pollution",
     num_rollout_workers: int = 2,
     rollout_fragment_length: int = 100,
     train_batch_size: int = 6400,

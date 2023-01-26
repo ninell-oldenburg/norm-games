@@ -26,6 +26,7 @@ local meltingpot = 'meltingpot.lua.modules.'
 local component = require(meltingpot .. 'component')
 local component_registry = require(meltingpot .. 'component_registry')
 
+local _COMPASS = {'N', 'E', 'S', 'W'}
 
 local function concat(table1, table2)
   local resultTable = {}
@@ -46,29 +47,7 @@ local function extractPieceIdsFromObjects(gameObjects)
   return result
 end
 
-
-local Neighborhoods = class.Class(component.Component)
-
-function Neighborhoods:__init__(kwargs)
-  kwargs = args.parse(kwargs, {
-      {'name', args.default('Neighborhoods')},
-  })
-  Neighborhoods.Base.__init__(self, kwargs)
-end
-
-function Neighborhoods:reset()
-  self._variables.pieceToNumNeighbors = {}
-end
-
-function Neighborhoods:getPieceToNumNeighbors()
-  -- Note: this table is frequently modified by callbacks.
-  return self._variables.pieceToNumNeighbors
-end
-
-function Neighborhoods:getUpperBoundPossibleNeighbors()
-  return self._config.upperBoundPossibleNeighbors
-end
-
+-- NON-AVATAR COMPONENTS
 
 local DensityRegrow = class.Class(component.Component)
 
@@ -80,6 +59,9 @@ function DensityRegrow:__init__(kwargs)
       {'radius', args.numberType},
       {'regrowthProbabilities', args.tableType},
       {'canRegrowIfOccupied', args.default(true)},
+      {'maxAppleGrowthRate', args.ge(0.0), args.le(1.0)},
+      {'thresholdDepletion', args.ge(0.0), args.le(1.0)},
+      {'thresholdRestoration', args.ge(0.0), args.le(1.0)},
   })
   DensityRegrow.Base.__init__(self, kwargs)
 
@@ -96,6 +78,10 @@ function DensityRegrow:__init__(kwargs)
     self._config.upperBoundPossibleNeighbors = 0
   end
   self._config.canRegrowIfOccupied = kwargs.canRegrowIfOccupied
+
+  self._config.maxAppleGrowthRate = kwargs.maxAppleGrowthRate
+  self._config.thresholdDepletion = kwargs.thresholdDepletion
+  self._config.thresholdRestoration = kwargs.thresholdRestoration
 
   self._started = false
 end
@@ -150,11 +136,28 @@ function DensityRegrow:postStart()
   self._started = true
   self._underlyingGrass = self.gameObject:getComponent(
       'Transform'):queryPosition('background')
+  local sceneObject = self.gameObject.simulation:getSceneObject()
+  self._riverMonitor = sceneObject:getComponent('RiverMonitor')
 end
 
 function DensityRegrow:update()
   if self.gameObject:getLayer() == 'logic' then
     self:_updateWaitState()
+  end
+  local dirtCount = self._riverMonitor:getDirtCount()
+  local cleanCount = self._riverMonitor:getCleanCount()
+  local dirtFraction = dirtCount / (dirtCount + cleanCount)
+
+  local depletion = self._config.thresholdDepletion
+  local restoration = self._config.thresholdRestoration
+  local interpolation = (dirtFraction - depletion) / (restoration - depletion)
+  -- By setting `thresholdRestoration` > 0.0 it would be possible to push
+  -- the interpolation factor above 1.0, but we disallow that.
+  interpolation = math.min(interpolation, 1.0)
+
+  local probability = self._config.maxAppleGrowthRate * interpolation
+  if random:uniformReal(0.0, 1.0) < probability then
+    self.gameObject:setState('apple')
   end
 end
 
@@ -319,6 +322,366 @@ function DirtCleaning:onHit(hittingGameObject, hitName)
 end
 
 
+-- An object that is edible switches state when an avatar touches it, and
+-- provides a reward. It can be used in combination to the FixedRateRegrow.
+local Edible = class.Class(component.Component)
+
+function Edible:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('Edible')},
+      {'liveState', args.stringType},
+      {'waitState', args.stringType},
+      {'rewardForEating', args.numberType},
+  })
+  Edible.Base.__init__(self, kwargs)
+
+  self._config.liveState = kwargs.liveState
+  self._config.waitState = kwargs.waitState
+  self._config.rewardForEating = kwargs.rewardForEating
+end
+
+function Edible:reset()
+  self._waitState = self._config.waitState
+  self._liveState = self._config.liveState
+end
+
+function Edible:setWaitState(newWaitState)
+  self._waitState = newWaitState
+end
+
+function Edible:getWaitState()
+  return self._waitState
+end
+
+function Edible:setLiveState(newLiveState)
+  self._liveState = newLiveState
+end
+
+function Edible:getLiveState()
+  return self._liveState
+end
+
+function Edible:onEnter(enteringGameObject, contactName)
+  if contactName == 'avatar' then
+    if self.gameObject:getState() == self._liveState then
+      -- Reward the player who ate the edible.
+      local avatarComponent = enteringGameObject:getComponent('Avatar')
+      -- Trigger role-specific logic if applicable.
+      if enteringGameObject:hasComponent('Taste') then
+        enteringGameObject:getComponent('Taste'):consumed(
+          self._config.rewardForEating)
+      else
+        avatarComponent:addReward(self._config.rewardForEating)
+      end
+      events:add('edible_consumed', 'dict',
+                 'player_index', avatarComponent:getIndex())  -- int
+      -- Change the edible to its wait (disabled) state.
+      self.gameObject:setState(self._waitState)
+    end
+  end
+end
+
+
+local Neighborhoods = class.Class(component.Component)
+
+function Neighborhoods:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('Neighborhoods')},
+  })
+  Neighborhoods.Base.__init__(self, kwargs)
+end
+
+function Neighborhoods:reset()
+  self._variables.pieceToNumNeighbors = {}
+end
+
+function Neighborhoods:getPieceToNumNeighbors()
+  -- Note: this table is frequently modified by callbacks.
+  return self._variables.pieceToNumNeighbors
+end
+
+function Neighborhoods:getUpperBoundPossibleNeighbors()
+  return self._config.upperBoundPossibleNeighbors
+end
+
+
+-- The `Paintbrush` component endows an avatar with the ability to grasp an
+-- object in the direction they are facing.
+
+local Paintbrush = class.Class(component.Component)
+
+function Paintbrush:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('Paintbrush')},
+      {'shape', args.tableType},
+      {'palette', args.tableType},
+      {'playerIndex', args.numberType},
+  })
+  Paintbrush.Base.__init__(self, kwargs)
+  self._config.shape = kwargs.shape
+  self._config.palette = kwargs.palette
+  self._config.playerIndex = kwargs.playerIndex
+end
+
+function Paintbrush:addSprites(tileSet)
+  for j=1, 4 do
+    local spriteData = {
+      palette = self._config.palette,
+      text = self._config.shape[j],
+      noRotate = true
+    }
+    tileSet:addShape(
+      'brush' .. self._config.playerIndex .. '.' .. _COMPASS[j], spriteData)
+  end
+end
+
+function Paintbrush:addHits(worldConfig)
+  local playerIndex = self._config.playerIndex
+  for j=1, 4 do
+    local hitName = 'directionHit' .. playerIndex
+    worldConfig.hits[hitName] = {
+        layer = 'directionIndicatorLayer',
+        sprite = 'brush' .. self._config.playerIndex,
+  }
+  end
+end
+
+
+function Paintbrush:registerUpdaters(updaterRegistry)
+  local playerIndex = self._config.playerIndex
+  self._avatar = self.gameObject:getComponent('Avatar')
+  local drawBrush = function()
+    local beam = 'directionHit' .. playerIndex
+    self.gameObject:hitBeam(beam, 1, 0)
+  end
+  updaterRegistry:registerUpdater{
+      updateFn = drawBrush,
+      priority = 130,
+  }
+end
+
+-- Resources component --
+
+local Resource = class.Class(component.Component)
+
+function Resource:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('Resource')},
+      {'initialHealth', args.positive},
+      {'destroyedState', args.stringType},
+      {'reward', args.numberType},
+      {'rewardRate', args.numberType},
+      {'rewardDelay', args.numberType},
+      {'delayTillSelfRepair', args.default(15), args.ge(0)},  -- frames
+      {'selfRepairProbability', args.default(0.1), args.ge(0.0), args.le(1.0)},
+  })
+  Resource.Base.__init__(self, kwargs)
+
+  self._config.initialHealth = kwargs.initialHealth
+  self._config.destroyedState = kwargs.destroyedState
+  self._config.reward = kwargs.reward
+  self._config.rewardRate = kwargs.rewardRate
+  self._config.rewardDelay = kwargs.rewardDelay
+  self._config.delayTillSelfRepair = kwargs.delayTillSelfRepair
+  self._config.selfRepairProbability = kwargs.selfRepairProbability
+end
+
+function Resource:reset()
+  self._health = self._config.initialHealth
+  self._rewardingStatus = 'inactive'
+  self._claimedByAvatarComponent = nil
+  self._neverYetClaimed = true
+  self._destroyed = false
+  self._framesSinceZapped = nil
+end
+
+function Resource:registerUpdaters(updaterRegistry)
+  local provideRewards = function()
+    if self.gameObject:getState() ~= self._config.destroyedState then
+      if self._claimedByAvatarComponent.gameObject:hasComponent('Taste') then
+        local avatarObject = self._claimedByAvatarComponent.gameObject
+        local tasteComponent = avatarObject:getComponent('Taste')
+        tasteComponent:addDefaultReward(self._config.reward)
+      else
+        self._claimedByAvatarComponent:addReward(self._config.reward)
+      end
+      self._rewardingStatus = 'active'
+    end
+  end
+  updaterRegistry:registerUpdater{
+      updateFn = provideRewards,
+      group = 'claimedResources',
+      probability = self._config.rewardRate,
+      startFrame = self._config.rewardDelay,
+  }
+  local function releaseClaimOfDeadAgent()
+    if self._claimedByAvatarComponent:isWait() and not self._destroyed then
+      local stateManager = self.gameObject:getComponent('StateManager')
+      self.gameObject:setState(stateManager:getInitialState())
+      self._rewardingStatus = 'inactive'
+      self._claimedByAvatarComponent = nil
+    end
+  end
+  updaterRegistry:registerUpdater{
+      updateFn = releaseClaimOfDeadAgent,
+      group = 'claimedResources',
+      priority = 2,
+      startFrame = 5,
+  }
+end
+
+function Resource:_claim(hittingGameObject)
+  self._claimedByAvatarComponent = hittingGameObject:getComponent('Avatar')
+  local claimedByIndex = self._claimedByAvatarComponent:getIndex()
+  local claimedName = 'claimed_by_' .. tostring(claimedByIndex)
+  if self.gameObject:getState() ~= claimedName and not self._destroyed then
+    self.gameObject:setState(claimedName)
+    self._rewardingStatus = 'inactive'
+    -- If player has a role that gets rewarded for claiming, apply that reward.
+    if hittingGameObject:hasComponent('Taste') then
+      hittingGameObject:getComponent('Taste'):addRewardIfApplicable(
+        self._neverYetClaimed)
+    end
+    self._neverYetClaimed = false
+    -- Report the claiming event.
+    events:add('claimed_resource', 'dict',
+               'player_index', claimedByIndex)  -- int
+  end
+end
+
+function Resource:onHit(hittingGameObject, hitName)
+  if string.sub(hitName, 1, string.len('directionHit')) == 'directionHit' then
+    self:_claim(hittingGameObject)
+  end
+
+  for i = 1, self._numPlayers do
+    local beamName = 'claimBeam_' .. tostring(i)
+    if hitName == beamName then
+      self:_claim(hittingGameObject)
+      -- Claims pass through resources.
+      return false
+    end
+  end
+
+  if hitName == 'zapHit' then
+    self._health = self._health - 1
+    self._framesSinceZapped = 0
+    if self._health == 0 then
+      -- Reset the health state variable.
+      self._health = self._config.initialHealth
+      -- Remove the resource from the map.
+      self.gameObject:setState(self._config.destroyedState)
+      -- Tell the reward indicator the resource was destroyed.
+      self._rewardingStatus = 'inactive'
+      -- Destroy the resource's associated texture objects.
+      self._texture_object:setState('destroyed')
+      -- Tell the resource's associated damage indicator.
+      self._associatedDamageIndicator:setState('inactive')
+      -- Record the destruction event.
+      local playerIndex = hittingGameObject:getComponent('Avatar'):getIndex()
+      events:add('destroyed_resource', 'dict',
+                 'player_index', playerIndex)  -- int
+      self._destroyed = true
+      -- Zaps pass through a destroyed resource.
+      return false
+    end
+    -- Zaps do not pass through after hitting an undestroyed resource.
+    return true
+  end
+
+  -- Other beams (if any exist) pass through.
+  return false
+end
+
+function Resource:start()
+  self._numPlayers = self.gameObject.simulation:getNumPlayers()
+end
+
+function Resource:postStart()
+  self._texture_object = self.gameObject:getComponent(
+      'Transform'):queryPosition('lowerPhysical')
+  self._associatedDamageIndicator = self.gameObject:getComponent(
+      'Transform'):queryPosition('superDirectionIndicatorLayer')
+end
+
+function Resource:update()
+  if self._health < self._config.initialHealth then
+    self._associatedDamageIndicator:setState('damaged')
+    if self._framesSinceZapped >= self._config.delayTillSelfRepair then
+      if random:uniformReal(0, 1) < self._config.selfRepairProbability then
+        self._health = self._health + 1
+        if self._health == self._config.initialHealth then
+          self._associatedDamageIndicator:setState('inactive')
+        end
+      end
+    end
+    self._framesSinceZapped = self._framesSinceZapped + 1
+  end
+end
+
+function Resource:getRewardingStatus()
+  return self._rewardingStatus
+end
+
+
+-- AVATAR COMPONENTS --
+
+local AllNonselfCumulants = class.Class(component.Component)
+
+function AllNonselfCumulants:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('AllNonselfCumulants')},
+  })
+  AllNonselfCumulants.Base.__init__(self, kwargs)
+end
+
+function AllNonselfCumulants:reset()
+  self._playerIndex = self.gameObject:getComponent('Avatar'):getIndex()
+  self._globalData = self.gameObject.simulation:getSceneObject():getComponent(
+      'GlobalData')
+
+  local numPlayers = self.gameObject.simulation:getNumPlayers()
+  self._tmpTensor = tensor.Tensor(numPlayers):fill(0)
+
+  self.num_others_who_cleaned_this_step = 0
+  self.num_others_who_ate_this_step = 0
+end
+
+function AllNonselfCumulants:sumNonself(vector)
+  -- Copy the vector so as not to modify the original.
+  self._tmpTensor:copy(vector)
+  self._tmpTensor(self._playerIndex):val(0)
+  local result = self._tmpTensor:sum()
+  self._tmpTensor:fill(0)
+  return result
+end
+
+function AllNonselfCumulants:registerUpdaters(updaterRegistry)
+
+  local function getCumulants()
+    self.num_others_who_cleaned_this_step = self:sumNonself(
+        self._globalData.playersWhoCleanedThisStep)
+    self.num_others_who_ate_this_step = self:sumNonself(
+        self._globalData.playersWhoAteThisStep)
+  end
+
+  updaterRegistry:registerUpdater{
+      updateFn = getCumulants,
+      priority = 4,
+  }
+
+  local function resetCumulants()
+    self.num_others_who_cleaned_this_step = 0
+    self.num_others_who_ate_this_step = 0
+    self._tmpTensor:fill(0)
+  end
+
+  updaterRegistry:registerUpdater{
+      updateFn = resetCumulants,
+      priority = 400,
+  }
+end
+
 --[[ The Cleaner component provides a beam that can be used to clean dirt.
 
 Arguments:
@@ -417,47 +780,128 @@ function Cleaner:setCumulant()
 end
 
 
---[[ The RiverMonitor is a scene component that tracks the state of the river.
+local ResourceClaimer = class.Class(component.Component)
 
-Other components such as dirt spawners and loggers can pull data from it.
-]]
-local RiverMonitor = class.Class(component.Component)
-
-function RiverMonitor:__init__(kwargs)
+function ResourceClaimer:__init__(kwargs)
   kwargs = args.parse(kwargs, {
-      {'name', args.default('RiverMonitor')},
+      {'name', args.default('ResourceClaimer')},
+      {'playerIndex', args.numberType},
+      {'beamLength', args.numberType},
+      {'beamRadius', args.numberType},
+      {'beamWait', args.numberType},
+      {'color', args.tableType},
   })
-  RiverMonitor.Base.__init__(self, kwargs)
+  ResourceClaimer.Base.__init__(self, kwargs)
+
+  self._kwargs = kwargs
+  self._config.beamLength = kwargs.beamLength
+  self._config.beamRadius = kwargs.beamRadius
+  self._config.beamWait = kwargs.beamWait
+  self._config.beamColor = kwargs.color
+
+  -- Each player makes claims for their own dedicated resource.
+  self._playerIndex = kwargs.playerIndex
+  self._claimBeamName = 'claimBeam_' .. tostring(self._playerIndex)
+  self._beamSpriteName = 'claimBeamSprite_' .. tostring(self._playerIndex)
 end
 
-function RiverMonitor:reset()
-  self._dirtCount = 0
-  self._cleanCount = 0
+function ResourceClaimer:reset()
+  self._cooldown = 0
 end
 
-function RiverMonitor:incrementDirtCount()
-  self._dirtCount = self._dirtCount + 1
+function ResourceClaimer:addSprites(tileSet)
+  tileSet:addColor(self._beamSpriteName, self._config.beamColor)
 end
 
-function RiverMonitor:decrementDirtCount()
-  self._dirtCount = self._dirtCount - 1
+function ResourceClaimer:addHits(worldConfig)
+  worldConfig.hits[self._claimBeamName] = {
+      layer = 'superDirectionIndicatorLayer',
+      sprite = self._beamSpriteName,
+  }
 end
 
-function RiverMonitor:incrementCleanCount()
-  self._cleanCount = self._cleanCount + 1
+function ResourceClaimer:registerUpdaters(updaterRegistry)
+  local claim = function()
+    local playerVolatileVariables = (
+        self.gameObject:getComponent('Avatar'):getVolatileData())
+    local actions = playerVolatileVariables.actions
+    if self._config.beamWait >= 0 then
+      if self._cooldown > 0 then
+        self._cooldown = self._cooldown - 1
+      else
+        if actions['fireClaim'] == 1 then
+          self._cooldown = self._config.beamWait
+          self.gameObject:hitBeam(self._claimBeamName,
+                                  self._config.beamLength,
+                                  self._config.beamRadius)
+        end
+      end
+    end
+  end
+
+  updaterRegistry:registerUpdater{
+      updateFn = claim,
+  }
 end
 
-function RiverMonitor:decrementCleanCount()
-  self._cleanCount = self._cleanCount - 1
+
+--[[ The Taste component assigns specific roles to agents. Not used in defaults.
+]]
+local Taste = class.Class(component.Component)
+
+function Taste:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('Taste')},
+      {'role', args.default('free'), args.oneOf('free', 'cleaner', 'consumer')},
+      {'rewardAmount', args.default(1), args.numberType},
+
+  })
+  Taste.Base.__init__(self, kwargs)
+  self._config.role = kwargs.role
+  self._config.rewardAmount = kwargs.rewardAmount
 end
 
-function RiverMonitor:getDirtCount()
-  return self._dirtCount
+function Taste:registerUpdaters(updaterRegistry)
+  local function resetCumulant()
+    self.player_ate_apple = 0
+  end
+  updaterRegistry:registerUpdater{
+      updateFn = resetCumulant,
+      priority = 400,
+  }
 end
 
-function RiverMonitor:getCleanCount()
-  return self._cleanCount
+function Taste:cleaned()
+  if self._config.role == 'cleaner' then
+    self.gameObject:getComponent('Avatar'):addReward(self._config.rewardAmount)
+  end
+  if self._config.role == 'consumer' then
+    self.gameObject:getComponent('Avatar'):addReward(0.0)
+  end
 end
+
+function Taste:consumed(edibleDefaultReward)
+  if self._config.role == 'cleaner' then
+    self.gameObject:getComponent('Avatar'):addReward(0.0)
+  elseif self._config.role == 'consumer' then
+    self.gameObject:getComponent('Avatar'):addReward(self._config.rewardAmount)
+  else
+    self.gameObject:getComponent('Avatar'):addReward(edibleDefaultReward)
+  end
+  self:setCumulant()
+end
+
+function Taste:setCumulant()
+  self.player_ate_apple = self.player_ate_apple + 1
+
+  local globalData = self.gameObject.simulation:getSceneObject():getComponent(
+      'GlobalData')
+  local playerIndex = self.gameObject:getComponent('Avatar'):getIndex()
+  globalData:setAteThisStep(playerIndex)
+end
+
+
+-- SCENE COMPONENTS
 
 --[[ The DirtSpawner is a scene component that spawns dirt at a fixed rate.
 
@@ -543,14 +987,70 @@ function GlobalData:setAteThisStep(playerIndex)
   self.playersWhoAteThisStep(playerIndex):val(1)
 end
 
+--[[ The RiverMonitor is a scene component that tracks the state of the river.
+
+Other components such as dirt spawners and loggers can pull data from it.
+]]
+local RiverMonitor = class.Class(component.Component)
+
+function RiverMonitor:__init__(kwargs)
+  kwargs = args.parse(kwargs, {
+      {'name', args.default('RiverMonitor')},
+  })
+  RiverMonitor.Base.__init__(self, kwargs)
+end
+
+function RiverMonitor:reset()
+  self._dirtCount = 0
+  self._cleanCount = 0
+end
+
+function RiverMonitor:incrementDirtCount()
+  self._dirtCount = self._dirtCount + 1
+end
+
+function RiverMonitor:decrementDirtCount()
+  self._dirtCount = self._dirtCount - 1
+end
+
+function RiverMonitor:incrementCleanCount()
+  self._cleanCount = self._cleanCount + 1
+end
+
+function RiverMonitor:decrementCleanCount()
+  self._cleanCount = self._cleanCount - 1
+end
+
+function RiverMonitor:getDirtCount()
+  return self._dirtCount
+end
+
+function RiverMonitor:getCleanCount()
+  return self._cleanCount
+end
+
+
+
 local allComponents = {
-    Neighborhoods = Neighborhoods,
+  -- Non-avatar components.
     DensityRegrow = DensityRegrow,
+    DirtCleaning = DirtCleaning,
+    DirtTracker = DirtTracker,
+    Edible = Edible,
+    Neighborhoods = Neighborhoods,
+    Paintbrush = Paintbrush,
+    Resource = Resource,
+
+    -- Avatar components
+    AllNonselfCumulants = AllNonselfCumulants,
+    Cleaner = Cleaner,
+    Taste = Taste,
+    ResourceClaimer = ResourceClaimer,
 
     -- Scene components.
-    RiverMonitor = RiverMonitor,
     DirtSpawner = DirtSpawner,
     GlobalData = GlobalData,
+    RiverMonitor = RiverMonitor,
 }
 
 component_registry.registerAllComponents(allComponents)
