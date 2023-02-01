@@ -27,7 +27,7 @@ from meltingpot.python import substrate
 
 def get_config(
     substrate_name: str = "commons_harvest_with_territory_and_pollution",
-    num_rollout_workers: int = 2,
+    #num_rollout_workers: int = 7,
     rollout_fragment_length: int = 100,
     train_batch_size: int = 6400,
     fcnet_hiddens=(64, 64),
@@ -57,7 +57,7 @@ def get_config(
   config = ppo.PPOConfig()
   # Number of arenas.
   # This is called num_rollout_workers in 2.2.0.
-  config.num_workers = num_rollout_workers
+  #config.num_workers = num_rollout_workers
   # This is to match our unroll lengths.
   config.rollout_fragment_length = rollout_fragment_length
   # Total (time x batch) timesteps on the learning update.
